@@ -1,0 +1,12 @@
+# Web Crypto Trading Bot
+
+A simple web-based cryptocurrency trading bot that analyzes 15 popular coins and provides buy signals.
+
+## Features
+- Real-time analysis of 15 cryptocurrencies
+- RSI, Moving Average, and Volume-based signals
+- Auto-refresh every 60 seconds
+- Beautiful web interface
+
+## Live Demo
+The app is deployed on Streamlit Cloud and ready to use!
