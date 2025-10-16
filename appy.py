@@ -1,11 +1,10 @@
 import streamlit as st
-import ccxt
 import pandas as pd
 import numpy as np
-import ta
-import plotly.graph_objects as go
 from datetime import datetime
 import time
+import requests
+import json
 
 # Page configuration
 st.set_page_config(
@@ -14,75 +13,100 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for better appearance
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
+        font-size: 2.5rem;
         color: #1f77b4;
         text-align: center;
-        margin-bottom: 2rem;
+        margin-bottom: 1rem;
     }
     .signal-card {
         padding: 1rem;
         border-radius: 10px;
         margin: 10px 0;
         border-left: 5px solid;
+        background-color: #f0f2f6;
     }
     .strong-buy {
         border-color: #00ff00;
-        background-color: rgba(0, 255, 0, 0.1);
     }
     .moderate-buy {
         border-color: #ffff00;
-        background-color: rgba(255, 255, 0, 0.1);
     }
     .weak-buy {
         border-color: #00ffff;
-        background-color: rgba(0, 255, 255, 0.1);
     }
 </style>
 """, unsafe_allow_html=True)
 
-class WebTradingBot:
+class SimpleTradingBot:
     def __init__(self):
-        self.exchange = ccxt.binance()
         self.popular_pairs = [
-            'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT',
-            'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'LINK/USDT',
-            'MATIC/USDT', 'LTC/USDT', 'SHIB/USDT', 'PEPE/USDT', 'FLOKI/USDT'
+            'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+            'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'
         ]
     
-    def get_price_data(self, symbol, timeframe='1m', limit=50):
+    def get_binance_data(self, symbol, interval='1m', limit=50):
+        """Get data from Binance API without ccxt"""
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            url = f"https://api.binance.com/api/v3/klines"
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'limit': limit
+            }
+            response = requests.get(url, params=params)
+            data = response.json()
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(data, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            
+            # Convert types
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
-        except:
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            
+            return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+            
+        except Exception as e:
+            st.warning(f"Could not fetch data for {symbol}")
             return None
     
-    def calculate_indicators(self, df):
+    def calculate_rsi(self, prices, window=14):
+        """Calculate RSI manually"""
         try:
-            # RSI
-            df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-            
-            # Moving Averages
-            df['ema_fast'] = ta.trend.EMAIndicator(df['close'], window=8).ema_indicator()
-            df['ema_slow'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
-            
-            # Volume
-            df['volume_ma'] = df['volume'].rolling(window=20).mean()
-            df['volume_ratio'] = df['volume'] / df['volume_ma']
-            
-            return df
+            delta = prices.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            return rsi
         except:
-            return None
+            return pd.Series([50] * len(prices))  # Default value
     
-    def generate_signal(self, df, symbol):
+    def calculate_ema(self, prices, window):
+        """Calculate EMA manually"""
+        return prices.ewm(span=window).mean()
+    
+    def analyze_symbol(self, symbol):
+        """Analyze a single symbol"""
         try:
+            df = self.get_binance_data(symbol)
             if df is None or len(df) < 20:
                 return None
+            
+            # Calculate indicators manually
+            df['rsi'] = self.calculate_rsi(df['close'])
+            df['ema_fast'] = self.calculate_ema(df['close'], 8)
+            df['ema_slow'] = self.calculate_ema(df['close'], 21)
+            df['volume_ma'] = df['volume'].rolling(window=20).mean()
+            df['volume_ratio'] = df['volume'] / df['volume_ma']
             
             latest = df.iloc[-1]
             
@@ -90,7 +114,7 @@ class WebTradingBot:
             points = 0
             conditions = []
             
-            # RSI condition
+            # RSI conditions
             if latest['rsi'] < 30:
                 points += 25
                 conditions.append("RSI Oversold")
@@ -109,110 +133,120 @@ class WebTradingBot:
                 conditions.append("High Volume")
             
             # Price momentum
-            price_change = (latest['close'] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
-            if price_change > -2:
+            price_change = (latest['close'] - df['close'].iloc[-10]) / df['close'].iloc[-10] * 100
+            if price_change > -3:
                 points += 10
                 conditions.append("Good Momentum")
             
-            # Determine signal strength
+            # Determine signal
             if points >= 50:
                 if points >= 70:
-                    signal_type = "STRONG BUY"
+                    signal_type = "STRONG BUY 🟢"
                     signal_class = "strong-buy"
                 elif points >= 60:
-                    signal_type = "MODERATE BUY"
+                    signal_type = "MODERATE BUY 🟡"
                     signal_class = "moderate-buy"
                 else:
-                    signal_type = "WEAK BUY"
+                    signal_type = "WEAK BUY 🔵"
                     signal_class = "weak-buy"
                 
-                signal_data = {
+                return {
                     'symbol': symbol,
                     'signal': signal_type,
                     'class': signal_class,
                     'confidence': points,
-                    'price': round(latest['close'], 6),
+                    'price': round(latest['close'], 4),
                     'rsi': round(latest['rsi'], 1),
                     'volume_ratio': round(latest['volume_ratio'], 1),
-                    'conditions': conditions,
-                    'timestamp': datetime.now()
+                    'conditions': conditions
                 }
-                return signal_data
             
             return None
             
-        except:
+        except Exception as e:
             return None
 
 def main():
-    # Header
-    st.markdown('<h1 class="main-header">🤖 Web Crypto Trading Bot</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🤖 Simple Crypto Trading Bot</h1>', unsafe_allow_html=True)
     
-    # Sidebar
-    st.sidebar.title("Settings")
-    auto_refresh = st.sidebar.checkbox("Auto Refresh Every 60 Seconds", value=True)
-    
-    if auto_refresh:
-        st.sidebar.write("Next refresh in 60 seconds")
+    st.write("""
+    This bot analyzes popular cryptocurrencies using Binance data and provides trading signals 
+    based on RSI, moving averages, and volume analysis.
+    """)
     
     # Initialize bot
-    bot = WebTradingBot()
+    bot = SimpleTradingBot()
     
     # Analysis section
-    st.subheader("🔍 Market Analysis")
+    col1, col2 = st.columns([3, 1])
     
-    if st.button("Analyze Now") or auto_refresh:
-        with st.spinner("Analyzing 15 popular cryptocurrencies..."):
-            signals = []
-            
-            # Progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for i, symbol in enumerate(bot.popular_pairs):
-                status_text.text(f"Analyzing {symbol}...")
+    with col1:
+        st.subheader("📊 Market Analysis")
+        
+        if st.button("🚀 Analyze Market Now", type="primary"):
+            with st.spinner("Analyzing 10 popular cryptocurrencies..."):
+                signals = []
                 
-                df = bot.get_price_data(symbol)
-                if df is not None:
-                    df = bot.calculate_indicators(df)
-                    signal = bot.generate_signal(df, symbol)
+                # Progress
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for i, symbol in enumerate(bot.popular_pairs):
+                    status_text.text(f"Analyzing {symbol}...")
+                    signal = bot.analyze_symbol(symbol)
                     if signal:
                         signals.append(signal)
+                    progress_bar.progress((i + 1) / len(bot.popular_pairs))
+                    time.sleep(0.5)  # Be nice to the API
                 
-                progress_bar.progress((i + 1) / len(bot.popular_pairs))
-            
-            status_text.text("Analysis complete!")
-            
-            # Display results
-            if signals:
-                st.success(f"🎯 Found {len(signals)} Trading Signals!")
+                status_text.text("Analysis complete!")
                 
-                # Sort by confidence
-                signals.sort(key=lambda x: x['confidence'], reverse=True)
-                
-                # Display each signal
-                for signal in signals:
-                    with st.container():
+                # Display results
+                if signals:
+                    st.success(f"🎯 Found {len(signals)} Trading Signals!")
+                    st.write("---")
+                    
+                    # Sort by confidence
+                    signals.sort(key=lambda x: x['confidence'], reverse=True)
+                    
+                    for signal in signals:
                         st.markdown(f"""
                         <div class="signal-card {signal['class']}">
-                            <h3>{signal['symbol']} - {signal['signal']}</h3>
-                            <p><strong>Confidence:</strong> {signal['confidence']}% | 
-                            <strong>Price:</strong> ${signal['price']} | 
-                            <strong>RSI:</strong> {signal['rsi']} | 
-                            <strong>Volume:</strong> {signal['volume_ratio']}x</p>
-                            <p><strong>Conditions:</strong> {', '.join(signal['conditions'])}</p>
+                            <h3>{signal['symbol']}</h3>
+                            <h4>{signal['signal']}</h4>
+                            <p><b>Confidence:</b> {signal['confidence']}% | 
+                            <b>Price:</b> ${signal['price']} | 
+                            <b>RSI:</b> {signal['rsi']} | 
+                            <b>Volume:</b> {signal['volume_ratio']}x</p>
+                            <p><b>Conditions:</b> {', '.join(signal['conditions'])}</p>
                         </div>
                         """, unsafe_allow_html=True)
-            else:
-                st.warning("⚠️ No strong trading signals found. Waiting for better opportunities...")
-            
-            # Show last update time
-            st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    st.warning("""
+                    ⚠️ No strong trading signals found at the moment.
+                    
+                    **This is normal!** The bot only shows signals when conditions are favorable.
+                    Try again in a few minutes when market conditions change.
+                    """)
     
-    # Auto-refresh logic
-    if auto_refresh:
-        time.sleep(60)
-        st.experimental_rerun()
+    with col2:
+        st.subheader("⚙️ Settings")
+        st.info("""
+        **How it works:**
+        - Analyzes RSI (Oversold/Bought)
+        - Checks trend direction
+        - Monitors trading volume
+        - Combines factors for confidence score
+        """)
+        
+        st.write("**Supported Coins:**")
+        for coin in bot.popular_pairs:
+            st.write(f"• {coin}")
+    
+    # Footer
+    st.write("---")
+    st.write(f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.caption("Note: This is for educational purposes only. Always do your own research.")
 
 if __name__ == "__main__":
     main()
